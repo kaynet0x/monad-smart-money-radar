@@ -45,22 +45,58 @@ app.post('/api/token-report', async (req, res) => {
   }
 
   const headers = {
-    apikey: apiKey,
-    'content-type': 'application/json'
+    apiKey,
+    'Content-Type': 'application/json'
   };
 
   try {
+    let tokenAddress = token;
+
+    if (!token.startsWith('0x')) {
+      const searchResponse = await fetch(`${nansenBaseUrl}/api/v1/search/general`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          search_query: token,
+          result_type: 'token',
+          chain,
+          limit: 5
+        })
+      });
+      const searchData = await readNansenResponse(searchResponse);
+
+      if (!searchResponse.ok) {
+        return res.status(searchResponse.status >= 400 ? searchResponse.status : 502).json({
+          error: 'nansen_api_error',
+          status: searchResponse.status,
+          upstream: searchData
+        });
+      }
+
+      tokenAddress = searchData?.tokens?.find(
+        (result) => typeof result?.address === 'string' && result.address
+      )?.address;
+
+      if (!tokenAddress) {
+        return res.status(404).json({
+          error: 'token_not_found',
+          message: `No token address found for search query: ${token}`
+        });
+      }
+    }
+
     const tokenInfoResponse = await fetch(`${nansenBaseUrl}/api/v1/tgm/token-information`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ chain, token_address: token, timeframe: '1d' })
+      body: JSON.stringify({ chain, token_address: tokenAddress, timeframe: '1d' })
     });
     const tokenInfo = await readNansenResponse(tokenInfoResponse);
 
     if (!tokenInfoResponse.ok) {
       return res.status(tokenInfoResponse.status >= 400 ? tokenInfoResponse.status : 502).json({
-        error: 'nansen_upstream_error',
-        status: tokenInfoResponse.status
+        error: 'nansen_api_error',
+        status: tokenInfoResponse.status,
+        upstream: tokenInfo
       });
     }
 
@@ -75,26 +111,36 @@ app.post('/api/token-report', async (req, res) => {
           headers,
           body: JSON.stringify({
             chains: [chain],
-            filters: { token_address: token }
+            filters: { token_address: tokenAddress }
           })
         });
+        const holdingsData = await readNansenResponse(holdingsResponse);
 
         if (holdingsResponse.ok) {
-          nansen.smart_money_holdings = await readNansenResponse(holdingsResponse);
+          nansen.smart_money_holdings = holdingsData;
         } else {
-          nansen.smart_money_holdings = {
-            available: false,
-            status: holdingsResponse.status
-          };
+          return res.status(holdingsResponse.status >= 400 ? holdingsResponse.status : 502).json({
+            error: 'nansen_api_error',
+            status: holdingsResponse.status,
+            upstream: holdingsData
+          });
         }
       } catch {
-        nansen.smart_money_holdings = { available: false, error: 'upstream_unavailable' };
+        return res.status(502).json({
+          error: 'nansen_api_error',
+          status: 502,
+          upstream: { error: 'upstream_unavailable' }
+        });
       }
     }
 
-    return res.status(200).json({ token, chain, nansen });
+    return res.status(200).json({ token, token_address: tokenAddress, chain, nansen });
   } catch {
-    return res.status(502).json({ error: 'nansen_upstream_unavailable' });
+    return res.status(502).json({
+      error: 'nansen_api_error',
+      status: 502,
+      upstream: { error: 'upstream_unavailable' }
+    });
   }
 });
 
